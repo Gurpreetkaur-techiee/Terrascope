@@ -2,7 +2,19 @@
 
 import { navItems } from "@/lib/terrascope-data";
 
-export default function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
+export type DashboardView = "mission" | "knowledge";
+
+export default function Sidebar({
+  open,
+  onClose,
+  view = "mission",
+  onViewChange,
+}: {
+  open: boolean;
+  onClose: () => void;
+  view?: DashboardView;
+  onViewChange?: (v: DashboardView) => void;
+}) {
   return (
     <>
       {open && <button aria-label="Close menu" onClick={onClose} className="fixed inset-0 z-30 bg-black/70 lg:hidden" />}
@@ -27,12 +39,37 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose: () 
             <a
               key={n.id}
               href={`#${n.id}`}
-              onClick={onClose}
+              onClick={(e) => {
+                // From the Knowledge AI view, return to mission control first, then scroll to the section.
+                if (view === "knowledge" && onViewChange) {
+                  e.preventDefault();
+                  onViewChange("mission");
+                  requestAnimationFrame(() => requestAnimationFrame(() => document.getElementById(n.id)?.scrollIntoView({ block: "start" })));
+                }
+                onClose();
+              }}
               className="border-l-2 border-transparent px-3 py-2 text-sm text-[#8fb0d8] transition hover:border-cyan-300 hover:bg-cyan-400/5 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300"
             >
               {n.label}
             </a>
           ))}
+          {onViewChange && (
+            <>
+              <div className="my-2 border-t border-cyan-400/10" />
+              <button
+                onClick={() => {
+                  onViewChange("knowledge");
+                  onClose();
+                }}
+                aria-current={view === "knowledge" ? "page" : undefined}
+                className={`border-l-2 px-3 py-2 text-left text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300 ${
+                  view === "knowledge" ? "border-cyan-300 bg-cyan-400/10 text-white" : "border-transparent text-[#8fb0d8] hover:border-cyan-300 hover:bg-cyan-400/5 hover:text-white"
+                }`}
+              >
+                Knowledge AI
+              </button>
+            </>
+          )}
         </nav>
 
         <div className="mt-auto border border-cyan-400/15 bg-[#06122b] p-3 text-xs leading-5 text-[#8fb0d8]">

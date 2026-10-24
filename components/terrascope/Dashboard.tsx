@@ -12,7 +12,12 @@ import Panel from "./Panel";
 import FirePanel from "./FirePanel";
 import { useFires } from "./useFires";
 import { fmtLat, fmtLon } from "@/lib/astro";
+<<<<<<< HEAD
 
+=======
+import KnowledgePanel from "./KnowledgePanel";
+import type { DashboardView } from "./Sidebar";
+>>>>>>> 37a3ece (Add Knowledge AI panel and remove old ORBIT chatbot)
 
 function UtcClock() {
   const [t, setT] = useState<Date | null>(null);
@@ -31,6 +36,11 @@ function UtcClock() {
 
 export default function Dashboard() {
   const [menu, setMenu] = useState(false);
+  const [view, setView] = useState<DashboardView>("mission");
+  const changeView = (v: DashboardView) => {
+    setView(v);
+    if (v === "knowledge") window.scrollTo({ top: 0 });
+  };
   const [selectedId, setSelectedId] = useState("ludhiana");
   const loc = locations.find((l) => l.id === selectedId)!;
   const fireState = useFires();
@@ -42,15 +52,15 @@ export default function Dashboard() {
 
   return (
     <div className="flex min-h-screen bg-[#030816] bg-[radial-gradient(ellipse_at_top,rgba(14,60,120,0.35),transparent_60%)] text-[#cfe8ff]">
-      <Sidebar open={menu} onClose={() => setMenu(false)} />
+      <Sidebar open={menu} onClose={() => setMenu(false)} view={view} onViewChange={changeView} />
       <div className="min-w-0 flex-1">
         <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-cyan-400/15 bg-[#030816]/85 px-4 py-3 backdrop-blur sm:px-8">
           <button onClick={() => setMenu(true)} aria-label="Open menu" className="border border-cyan-400/20 px-3 py-2 text-sm lg:hidden">Menu</button>
-          <LocationSearch locations={locations} onSelect={setSelectedId} />
+          {view === "mission" && <LocationSearch locations={locations} onSelect={setSelectedId} />}
           <UtcClock />
         </header>
 
-        <main className="mx-auto max-w-[1400px] space-y-6 px-4 py-6 sm:px-8">
+        <main hidden={view !== "mission"} className="mx-auto max-w-[1400px] space-y-6 px-4 py-6 sm:px-8">
           <section id="overview" className="scroll-mt-20">
             <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl [text-shadow:0_0_24px_rgba(34,211,238,0.35)]">{loc.name}</h1>
             <p className="mt-1 text-sm text-[#6f8cb3]">{loc.region} · <span className="font-mono text-[#8fb0d8]">{fmtLat(loc.lat)}, {fmtLon(loc.lon)}</span></p>
@@ -106,9 +116,17 @@ export default function Dashboard() {
             <ComparisonCards />
           </section>
         </main>
-        
+
+        {/* Kept mounted (just hidden) so switching views never resets the globe or the Knowledge AI answer. */}
+        <main id="knowledge" hidden={view !== "knowledge"} className="mx-auto max-w-[1400px] px-4 py-6 sm:px-8">
+          <KnowledgePanel />
+        </main>
       </div>
+<<<<<<< HEAD
        
+=======
+  
+>>>>>>> 37a3ece (Add Knowledge AI panel and remove old ORBIT chatbot)
     </div>
   );
 }
