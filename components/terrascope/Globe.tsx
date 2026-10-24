@@ -4,8 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import type { Location, Satellite } from "@/lib/terrascope-data";
 import { solarState, fmtLat, fmtLon } from "@/lib/astro";
+import type { FireMarker } from "./useFires";
 
 const RAD = Math.PI / 180;
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
 const ll = (lat: number, lon: number, r = 1) =>
   new THREE.Vector3(
     Math.cos(lat * RAD) * Math.sin(lon * RAD) * r,
@@ -66,18 +68,40 @@ type Props = {
   onSelect: (id: string) => void;
   /** Load /earth/day.jpg and /earth/night.jpg (equirectangular). Defaults to true. */
   useTextures?: boolean;
+  /** Optional NASA FIRMS detections drawn as markers on the globe. */
+  fires?: FireMarker[];
+  showFires?: boolean;
+  selectedFireId?: string | null;
+  onFireSelect?: (id: string) => void;
+  /** Reports how many markers were actually added to the scene (and how many invalid ones were skipped). */
+  onFireStats?: (s: { rendered: number; skipped: number }) => void;
+  /** Increment to zoom/center the globe on all current detections. */
+  frameSignal?: number;
 };
 
-export default function Globe({ locations, satellites, selectedId, onSelect, useTextures = true }: Props) {
+const FIRE_COLD = new THREE.Color("#ffd34d");
+const FIRE_HOT = new THREE.Color("#ff2d16");
+const fireColor = (frp: number | null) =>
+  frp === null ? FIRE_COLD.clone() : FIRE_COLD.clone().lerp(FIRE_HOT, Math.min(1, Math.log1p(Math.max(frp, 0)) / Math.log(60)));
+
+type FireApi = {
+  focus: (id: string) => void;
+  setFires: (list: FireMarker[]) => void;
+  setFiresVisible: (v: boolean) => void;
+  frameFires: () => void;
+  zoomBy: (factor: number) => void;
+};
+
+export default function Globe({ locations, satellites, selectedId, onSelect, useTextures = true, fires, showFires = true, selectedFireId = null, onFireSelect, onFireStats, frameSignal = 0 }: Props) {
   const wrap = useRef<HTMLDivElement>(null);
   const reticle = useRef<HTMLDivElement>(null);
-  const live = useRef({ selectedId, onSelect });
-  const api = useRef<{ focus: (id: string) => void } | null>(null);
+  const live = useRef({ selectedId, onSelect, fires, showFires, selectedFireId, onFireSelect, onFireStats });
+  const api = useRef<FireApi | null>(null);
   const [failed, setFailed] = useState(false);
   const sel = locations.find((l) => l.id === selectedId) ?? locations[0];
 
   useEffect(() => {
-    live.current = { selectedId, onSelect };
+    live.current = { selectedId, onSelect, fires, showFires, selectedFireId, onFireSelect, onFireStats };
   });
 
   useEffect(() => {
@@ -95,6 +119,8 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
     const canvas = renderer.domElement;
     canvas.className = "absolute inset-0 h-full w-full touch-pan-y";
     canvas.style.cursor = "grab";
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute("aria-label", "Interactive 3D Earth");
     renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     const scene = new THREE.Scene();
@@ -190,10 +216,12 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
     // Location pins
     const pins = locations.map((l) => {
       const pos = ll(l.lat, l.lon, 1.004);
-      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.014, 12, 12), new THREE.MeshBasicMaterial({ color: 0x7defff }));
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.014, 12, 12), new THREE.MeshBasicMaterial({ color: 0x7defff, transparent: true }));
+      dot.renderOrder = 3; // drawn after the fire markers (renderOrder 2) so a pin never hides detections beneath it
       dot.position.copy(pos);
       const ring = new THREE.Mesh(new THREE.RingGeometry(0.03, 0.036, 40), new THREE.MeshBasicMaterial({ color: 0x38e8ff, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
       ring.position.copy(pos);
+      ring.renderOrder = 3;
       ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), pos.clone().normalize());
       group.add(dot, ring);
       return { l, pos, dot, ring };
@@ -205,7 +233,88 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
       const l = locations.find((x) => x.id === id);
       if (l) { tgt.lat = l.lat; tgt.lon = l.lon; }
     };
-    api.current = { focus };
+
+    // Zoom: eased distance factor applied to the responsive base camera distance.
+    let camBase = 3.7;
+    let zoom = 1, zoomTarget = 1;
+    const MIN_Z = 0.06; // zoom works by narrowing the field of view (36° at zoom 1), so the camera never enters the atmosphere/orbits
+    const zoomBy = (f: number) => { zoomTarget = Math.min(1.25, Math.max(MIN_Z, zoomTarget * f)); };
+
+    // Fire markers: one Points object (soft glow sprites tinted by FRP) placed with the same ll() helper
+    // and Earth radius as the pins, slightly above the surface. Rebuilt via api.setFires without touching the scene.
+    const glow = document.createElement("canvas");
+    glow.width = glow.height = 64;
+    const gctx = glow.getContext("2d");
+    if (gctx) {
+      const g = gctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      g.addColorStop(0, "rgba(255,255,255,1)");
+      g.addColorStop(0.3, "rgba(255,255,255,0.95)");
+      g.addColorStop(0.55, "rgba(255,255,255,0.35)");
+      g.addColorStop(1, "rgba(255,255,255,0)");
+      gctx.fillStyle = g;
+      gctx.fillRect(0, 0, 64, 64);
+    }
+    const fireTex = new THREE.CanvasTexture(glow);
+    fireTex.colorSpace = THREE.SRGBColorSpace;
+    const fireMat = new THREE.PointsMaterial({ size: 18, sizeAttenuation: false, map: fireTex, vertexColors: true, transparent: true, depthWrite: false, alphaTest: 0.02 });
+    const fireRing = new THREE.Mesh(new THREE.RingGeometry(0.032, 0.04, 40), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+    fireRing.visible = false;
+    group.add(fireRing);
+    let firePoints: THREE.Points | null = null;
+    let fireData: { id: string; lat: number; lon: number; pos: THREE.Vector3 }[] = [];
+    let fireVisible = live.current.showFires;
+
+    const setFires = (list: FireMarker[]) => {
+      if (firePoints) {
+        group.remove(firePoints);
+        firePoints.geometry.dispose();
+        firePoints = null;
+      }
+      const valid = list.filter((f) => Number.isFinite(f.latitude) && Number.isFinite(f.longitude) && Math.abs(f.latitude) <= 90 && Math.abs(f.longitude) <= 180);
+      fireData = valid.map((f) => ({ id: f.id, lat: f.latitude, lon: f.longitude, pos: ll(f.latitude, f.longitude, 1.008) }));
+      if (!valid.length) {
+        live.current.onFireStats?.({ rendered: 0, skipped: list.length });
+        return;
+      }
+      const pos = new Float32Array(valid.length * 3);
+      const col = new Float32Array(valid.length * 3);
+      valid.forEach((f, i) => {
+        const c = fireColor(f.frp);
+        pos.set([fireData[i].pos.x, fireData[i].pos.y, fireData[i].pos.z], i * 3);
+        col.set([c.r, c.g, c.b], i * 3);
+      });
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+      firePoints = new THREE.Points(geo, fireMat);
+      firePoints.frustumCulled = false;
+      firePoints.renderOrder = 2;
+      firePoints.visible = fireVisible;
+      group.add(firePoints);
+      // Report the number of points really present in the Three.js geometry, not just the input length.
+      live.current.onFireStats?.({ rendered: geo.getAttribute("position").count, skipped: list.length - valid.length });
+    };
+    // Turn the globe to the centre of all detections and zoom so their spread fills part of the view.
+    const frameFires = () => {
+      if (!fireData.length) return;
+      const sum = new THREE.Vector3();
+      fireData.forEach((f) => sum.add(f.pos.clone().normalize()));
+      const c = sum.normalize();
+      let theta = 0.0;
+      fireData.forEach((f) => { theta = Math.max(theta, Math.acos(Math.min(1, c.dot(f.pos.clone().normalize())))); });
+      tgt.lat = Math.asin(c.y) / RAD;
+      tgt.lon = Math.atan2(c.x, c.z) / RAD;
+      const alpha = Math.atan(theta / Math.max(camBase - 1, 0.5)); // angular radius of the spread seen from the camera
+      const fovNeeded = (2 * alpha) / 0.38 / RAD; // spread radius ≈ 38% of the half-view
+      zoomTarget = Math.min(1.25, Math.max(MIN_Z, fovNeeded / 36));
+    };
+    const setFiresVisible = (v: boolean) => {
+      fireVisible = v;
+      if (firePoints) firePoints.visible = v;
+    };
+
+    api.current = { focus, setFires, setFiresVisible, frameFires, zoomBy };
+    setFires(live.current.fires ?? []);
 
     const setSun = () => {
       const s = solarState();
@@ -220,7 +329,8 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
-      camera.position.z = w / h < 0.9 ? 4.6 : 3.7;
+      camBase = w / h < 0.9 ? 4.6 : 3.7;
+      camera.position.z = camBase;
       camera.updateProjectionMatrix();
     };
     resize();
@@ -246,6 +356,22 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
       return best?.id ?? null;
     };
 
+    const pickFire = (cx: number, cy: number) => {
+      if (!fireVisible || !fireData.length) return null;
+      const r = canvas.getBoundingClientRect();
+      let best: { f: (typeof fireData)[number]; d: number } | null = null;
+      for (const f of fireData) {
+        wp.copy(f.pos);
+        group.localToWorld(wp);
+        toCam.copy(camera.position).sub(wp);
+        if (wp.dot(toCam) <= 0) continue;
+        wp.project(camera);
+        const d = Math.hypot(r.left + (wp.x * 0.5 + 0.5) * r.width - cx, r.top + (-wp.y * 0.5 + 0.5) * r.height - cy);
+        if (d < 14 && (!best || d < best.d)) best = { f, d };
+      }
+      return best?.f ?? null;
+    };
+
     let down: { x: number; y: number } | null = null, moved = false, lx = 0, ly = 0;
     const onDown = (e: PointerEvent) => {
       down = { x: e.clientX, y: e.clientY };
@@ -254,7 +380,7 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
     };
     const onMove = (e: PointerEvent) => {
       if (!down) {
-        canvas.style.cursor = pickPin(e.clientX, e.clientY) ? "pointer" : "grab";
+        canvas.style.cursor = pickPin(e.clientX, e.clientY) || pickFire(e.clientX, e.clientY) ? "pointer" : "grab";
         return;
       }
       if (!moved && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) { moved = true; canvas.style.cursor = "grabbing"; }
@@ -266,7 +392,15 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
     const onUp = (e: PointerEvent) => {
       if (down && !moved) {
         const id = pickPin(e.clientX, e.clientY);
-        if (id) live.current.onSelect(id);
+        if (id) live.current.onSelect(id); // location pins keep priority over fire markers
+        else {
+          const f = pickFire(e.clientX, e.clientY);
+          if (f) {
+            live.current.onFireSelect?.(f.id);
+            tgt.lat = f.lat;
+            tgt.lon = f.lon;
+          }
+        }
       }
       down = null;
       canvas.style.cursor = "grab";
@@ -277,6 +411,13 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
     canvas.addEventListener("pointermove", onMove);
     canvas.addEventListener("pointerup", onUp);
     canvas.addEventListener("pointercancel", onCancel);
+    // Ctrl/Cmd + scroll (also trackpad pinch) zooms; plain scroll still scrolls the page.
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      zoomBy(Math.exp(e.deltaY * 0.005));
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
 
     const t0 = Date.now();
     const v = new THREE.Vector3();
@@ -286,6 +427,13 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
       const k = reduce ? 1 : 0.08;
       cur.lon += (((tgt.lon - cur.lon + 540) % 360) - 180) * k;
       cur.lat += (tgt.lat - cur.lat) * k;
+      zoom += (zoomTarget - zoom) * (reduce ? 1 : 0.15);
+      camera.position.z = camBase;
+      const fov = 36 * zoom;
+      if (Math.abs(camera.fov - fov) > 1e-4) {
+        camera.fov = fov;
+        camera.updateProjectionMatrix();
+      }
       group.rotation.set(cur.lat * RAD, -cur.lon * RAD, 0, "XYZ");
       stars.rotation.set(cur.lat * RAD * 0.12, -cur.lon * RAD * 0.12, 0);
       group.updateMatrixWorld(true);
@@ -302,16 +450,27 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
 
       const sid = live.current.selectedId;
       const pulse = (time % 2) / 2;
+      // World size of one screen pixel at the globe surface, so pins/rings keep a constant on-screen size at any zoom.
+      const pxw = (2 * Math.tan((camera.fov / 2) * RAD) * Math.max(camera.position.z - 1, 0.3)) / Math.max(el.clientHeight, 1);
       pins.forEach((p) => {
         const on = p.l.id === sid;
         (p.dot.material as THREE.MeshBasicMaterial).color.set(on ? 0xffffff : 0x7defff);
-        p.dot.scale.setScalar(on ? 1.5 : 1);
+        p.dot.scale.setScalar(((5.4 * pxw) / 0.014) * (on ? 1.5 : 1)); // ~5px radius
         p.ring.visible = on;
         if (on) {
-          p.ring.scale.setScalar(1 + pulse * 1.6);
+          p.ring.scale.setScalar(((12 * pxw) / 0.033) * (1 + pulse * 1.6));
           (p.ring.material as THREE.MeshBasicMaterial).opacity = 1 - pulse;
         }
       });
+
+      const sf = fireVisible && live.current.selectedFireId ? fireData.find((f) => f.id === live.current.selectedFireId) : undefined;
+      fireRing.visible = !!sf;
+      if (sf) {
+        fireRing.position.copy(sf.pos);
+        fireRing.quaternion.setFromUnitVectors(Z_AXIS, v.copy(sf.pos).normalize());
+        fireRing.scale.setScalar(((13 * pxw) / 0.036) * (1 + pulse * 0.7)); // ~13px radius at any zoom
+        (fireRing.material as THREE.MeshBasicMaterial).opacity = 1 - pulse * 0.8;
+      }
 
       const rt = reticle.current;
       const sp0 = pins.find((p) => p.l.id === sid);
@@ -335,6 +494,7 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerup", onUp);
       canvas.removeEventListener("pointercancel", onCancel);
+      canvas.removeEventListener("wheel", onWheel);
       scene.traverse((o) => {
         const m = o as THREE.Mesh;
         m.geometry?.dispose();
@@ -345,6 +505,8 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
       disposed = true;
       loaded.forEach((t) => t.dispose());
       blank.dispose();
+      fireTex.dispose();
+      fireMat.dispose();
       renderer.dispose();
       canvas.remove();
       api.current = null;
@@ -356,13 +518,43 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
     api.current?.focus(selectedId);
   }, [selectedId]);
 
+  const autoFramed = useRef(false);
+  useEffect(() => {
+    api.current?.setFires(fires ?? []);
+    // Once, when the first detections arrive: frame them, otherwise a tight cluster looks like a single marker.
+    if (!autoFramed.current && fires && fires.length > 0) {
+      autoFramed.current = true;
+      api.current?.frameFires();
+    }
+  }, [fires]);
+
+  useEffect(() => {
+    api.current?.setFiresVisible(showFires);
+  }, [showFires]);
+
+  useEffect(() => {
+    if (frameSignal > 0) api.current?.frameFires();
+  }, [frameSignal]);
+
   return (
-    <div ref={wrap} className="relative h-full w-full overflow-hidden" role="img" aria-label={`3D Earth centered on ${sel.name}`}>
+    <div ref={wrap} className="relative h-full w-full overflow-hidden">
       {failed && (
         <p className="absolute inset-0 grid place-items-center p-6 text-center text-sm text-[#6f8cb3]">
           WebGL is unavailable in this browser, so the 3D Earth can’t be shown. The rest of the dashboard still works.
         </p>
       )}
+      <div className="absolute bottom-3 right-3 flex flex-col gap-1">
+        {([["+", 0.7, "Zoom in"], ["−", 1 / 0.7, "Zoom out"]] as const).map(([label, f, aria]) => (
+          <button
+            key={aria}
+            aria-label={aria}
+            onClick={() => api.current?.zoomBy(f)}
+            className="size-8 border border-cyan-400/25 bg-[#06122b]/80 text-lg leading-none text-cyan-100 hover:bg-cyan-400/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300"
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div ref={reticle} className="pointer-events-none absolute left-0 top-0 opacity-0">
         <div className="-ml-5 -mt-5 size-10 border border-cyan-300/80 shadow-[0_0_18px_rgba(34,211,238,0.5)] [clip-path:polygon(0_0,30%_0,30%_8%,8%_8%,8%_30%,0_30%,0_0,100%_0,100%_30%,92%_30%,92%_8%,70%_8%,70%_0)]" />
         <div className="absolute left-7 top-[-6px] whitespace-nowrap font-mono text-[11px] leading-4 text-cyan-200 [text-shadow:0_0_8px_rgba(0,0,0,0.9)]">

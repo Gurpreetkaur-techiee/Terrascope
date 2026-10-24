@@ -9,7 +9,10 @@ import Telemetry from "./Telemetry";
 import Timeline from "./Timeline";
 import ComparisonCards from "./ComparisonCards";
 import Panel from "./Panel";
+import FirePanel from "./FirePanel";
+import { useFires } from "./useFires";
 import { fmtLat, fmtLon } from "@/lib/astro";
+import OrbitAssistant from "./OrbitAssistant";
 
 function UtcClock() {
   const [t, setT] = useState<Date | null>(null);
@@ -30,6 +33,12 @@ export default function Dashboard() {
   const [menu, setMenu] = useState(false);
   const [selectedId, setSelectedId] = useState("ludhiana");
   const loc = locations.find((l) => l.id === selectedId)!;
+  const fireState = useFires();
+  const [showFires, setShowFires] = useState(true);
+  const [selectedFireId, setSelectedFireId] = useState<string | null>(null);
+  const [fireStats, setFireStats] = useState<{ rendered: number; skipped: number } | null>(null);
+  const [frameTick, setFrameTick] = useState(0);
+  const selectedFire = fireState.fires.find((f) => f.id === selectedFireId) ?? null;
 
   return (
     <div className="flex min-h-screen bg-[#030816] bg-[radial-gradient(ellipse_at_top,rgba(14,60,120,0.35),transparent_60%)] text-[#cfe8ff]">
@@ -50,10 +59,21 @@ export default function Dashboard() {
           <section id="globe" className="grid scroll-mt-20 gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
             <div className="relative border border-cyan-400/15 bg-[#020611] shadow-[0_0_60px_rgba(34,211,238,0.08)]">
               <div className="h-[420px] sm:h-[560px] xl:h-[680px]">
-                <Globe locations={locations} satellites={satellites} selectedId={selectedId} onSelect={setSelectedId} />
+                <Globe
+                  locations={locations}
+                  satellites={satellites}
+                  selectedId={selectedId}
+                  onSelect={setSelectedId}
+                  fires={fireState.fires}
+                  showFires={showFires}
+                  selectedFireId={selectedFireId}
+                  onFireSelect={setSelectedFireId}
+                  onFireStats={setFireStats}
+                  frameSignal={frameTick}
+                />
               </div>
               <p className="pointer-events-none absolute bottom-3 left-4 text-[11px] leading-4 text-[#6f8cb3]">
-                Drag to rotate · select a pin to target a site<br />Orbit paths are illustrative and not to scale
+                Drag to rotate · +/− or Ctrl+scroll to zoom · select a pin or fire marker<br />Orbit paths are illustrative and not to scale
               </p>
               <ul className="absolute right-3 top-3 hidden max-h-[60%] gap-1 overflow-auto sm:grid">
                 {locations.map((l) => (
@@ -69,7 +89,10 @@ export default function Dashboard() {
                 ))}
               </ul>
             </div>
-            <Telemetry loc={loc} satellites={satellites} />
+            <div className="space-y-4">
+              <FirePanel state={fireState} show={showFires} onToggle={() => setShowFires((v) => !v)} selected={selectedFire} onClear={() => setSelectedFireId(null)} rendered={fireStats?.rendered ?? null} onFrame={() => setFrameTick((n) => n + 1)} />
+              <Telemetry loc={loc} satellites={satellites} />
+            </div>
           </section>
 
           <section id="timeline" className="scroll-mt-20">
@@ -83,7 +106,9 @@ export default function Dashboard() {
             <ComparisonCards />
           </section>
         </main>
+        
       </div>
+       <OrbitAssistant selectedFire={selectedFire} />
     </div>
   );
 }
