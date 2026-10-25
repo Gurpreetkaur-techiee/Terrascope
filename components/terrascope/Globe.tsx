@@ -83,6 +83,13 @@ const FIRE_COLD = new THREE.Color("#ffd34d");
 const FIRE_HOT = new THREE.Color("#ff2d16");
 const fireColor = (frp: number | null) =>
   frp === null ? FIRE_COLD.clone() : FIRE_COLD.clone().lerp(FIRE_HOT, Math.min(1, Math.log1p(Math.max(frp, 0)) / Math.log(60)));
+type GpsPosition = {
+  lat: number;
+  lon: number;
+  accuracy: number;
+};
+
+type PlaceStatus = "idle" | "loading" | "ready" | "error";
 
 type FireApi = {
   focus: (id: string) => void;
@@ -90,6 +97,46 @@ type FireApi = {
   setFiresVisible: (v: boolean) => void;
   frameFires: () => void;
   zoomBy: (factor: number) => void;
+  centerOn: (lat: number, lon: number) => void;
+  setGpsPosition: (lat: number, lon: number) => void;
+  hideGpsMarker: () => void;
+};
+
+// ---- Reverse geocoding (OpenStreetMap Nominatim) ----
+// Usage policy: max 1 request/second, no heavy use, attribution required (shown in the GPS panel).
+const GEO_DEBOUNCE_MS = 800; // wait for the position to settle before asking
+const GEO_MIN_INTERVAL_MS = 1100; // never send two requests closer together than this
+const GEO_MIN_MOVE_M = 75; // ignore fixes that moved less than this since the last lookup
+const GEO_RETRY_BACKOFF_MS = 15000; // after a failed request, wait before trying again
+const GEO_CACHE_MAX = 50;
+
+const geoKey = (lat: number, lon: number) => `${lat.toFixed(3)},${lon.toFixed(3)}`; // ~110 m cells
+
+const haversineM = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+  const dLat = (lat2 - lat1) * RAD;
+  const dLon = (lon2 - lon1) * RAD;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * RAD) * Math.cos(lat2 * RAD) * Math.sin(dLon / 2) ** 2;
+  return 6371000 * 2 * Math.asin(Math.min(1, Math.sqrt(a)));
+};
+
+// Build "Locality, Region, Country" from whatever address fields the service actually returned.
+const placeFromAddress = (addr: Record<string, string | undefined> | undefined): string | null => {
+  if (!addr) return null;
+  const pick = (keys: string[]) => {
+    for (const k of keys) {
+      const v = addr[k];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return undefined;
+  };
+  const locality = pick(["city", "town", "village", "municipality", "hamlet", "suburb", "city_district", "neighbourhood", "county"]);
+  const region = pick(["state", "region", "province", "state_district"]);
+  const country = pick(["country"]);
+  const parts: string[] = [];
+  for (const p of [locality, region, country]) {
+    if (p && !parts.includes(p)) parts.push(p);
+  }
+  return parts.length ? parts.join(", ") : null;
 };
 
 export default function Globe({ locations, satellites, selectedId, onSelect, useTextures = true, fires, showFires = true, selectedFireId = null, onFireSelect, onFireStats, frameSignal = 0 }: Props) {
@@ -98,11 +145,207 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
   const live = useRef({ selectedId, onSelect, fires, showFires, selectedFireId, onFireSelect, onFireStats });
   const api = useRef<FireApi | null>(null);
   const [failed, setFailed] = useState(false);
+  const [gpsActive, setGpsActive] = useState(false);
+  const [gpsPosition, setGpsPosition] = useState<GpsPosition | null>(null);
+  const [gpsStatus, setGpsStatus] = useState("GPS tracking is off");
+  const [placeName, setPlaceName] = useState<string | null>(null);
+  const [placeStatus, setPlaceStatus] = useState<PlaceStatus>("idle");
+  const gpsWatchIdRef = useRef<number | null>(null);
+  const gpsCenteredRef = useRef(false);
+  // Latest fix, so the marker can be re-applied if the Three.js scene is ever rebuilt (locations/satellites/useTextures change).
+  const gpsLatestRef = useRef<{ lat: number; lon: number } | null>(null);
+  // Reverse-geocoding bookkeeping (all refs, so none of it triggers a Three.js scene rebuild).
+  const geoTimerRef = useRef<number | null>(null);
+  const geoAbortRef = useRef<AbortController | null>(null);
+  const geoReqIdRef = useRef(0); // bumped on every new/cancelled lookup; late responses with an old id are ignored
+  const geoLastRef = useRef<{ lat: number; lon: number } | null>(null);
+  const geoLastReqAtRef = useRef(0);
+  const geoRetryAfterRef = useRef(0);
+  const geoCacheRef = useRef<Map<string, string>>(new Map());
   const sel = locations.find((l) => l.id === selectedId) ?? locations[0];
+
+  const cancelGeocode = () => {
+    if (geoTimerRef.current !== null) {
+      window.clearTimeout(geoTimerRef.current);
+      geoTimerRef.current = null;
+    }
+    if (geoAbortRef.current) {
+      geoAbortRef.current.abort();
+      geoAbortRef.current = null;
+    }
+    geoReqIdRef.current++;
+  };
+
+  const scheduleReverseGeocode = (lat: number, lon: number) => {
+    // 1) Recent result for (almost) the same spot: reuse it, no network request.
+    const cached = geoCacheRef.current.get(geoKey(lat, lon));
+    if (cached) {
+      cancelGeocode();
+      geoLastRef.current = { lat, lon };
+      setPlaceName(cached);
+      setPlaceStatus("ready");
+      return;
+    }
+
+    // 2) Not a meaningful move since the last lookup, or we are backing off after a failure.
+    const last = geoLastRef.current;
+    if (last && haversineM(last.lat, last.lon, lat, lon) < GEO_MIN_MOVE_M) return;
+    if (Date.now() < geoRetryAfterRef.current) return;
+
+    // 3) Debounced, rate-limited lookup. A newer lookup cancels any pending/in-flight one.
+    geoLastRef.current = { lat, lon };
+    cancelGeocode();
+    const reqId = geoReqIdRef.current;
+    setPlaceStatus("loading");
+    const wait = Math.max(GEO_DEBOUNCE_MS, GEO_MIN_INTERVAL_MS - (Date.now() - geoLastReqAtRef.current));
+
+    geoTimerRef.current = window.setTimeout(async () => {
+      geoTimerRef.current = null;
+      const ctrl = new AbortController();
+      geoAbortRef.current = ctrl;
+      geoLastReqAtRef.current = Date.now();
+      try {
+        const lang = typeof navigator !== "undefined" && navigator.language ? navigator.language : "en";
+        const url =
+          `https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=14` +
+          `&lat=${encodeURIComponent(lat.toFixed(6))}&lon=${encodeURIComponent(lon.toFixed(6))}` +
+          `&accept-language=${encodeURIComponent(lang)}`;
+        const res = await fetch(url, { signal: ctrl.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as { address?: Record<string, string | undefined>; error?: string };
+        if (reqId !== geoReqIdRef.current) return; // a newer lookup superseded this one
+        const name = placeFromAddress(data.address);
+        if (!name) {
+          // The service answered but has no identifiable place here. Never invent one.
+          setPlaceName(null);
+          setPlaceStatus("error");
+          return;
+        }
+        const cache = geoCacheRef.current;
+        if (cache.size >= GEO_CACHE_MAX) {
+          const oldest = cache.keys().next().value;
+          if (oldest !== undefined) cache.delete(oldest);
+        }
+        cache.set(geoKey(lat, lon), name);
+        setPlaceName(name);
+        setPlaceStatus("ready");
+      } catch (err) {
+        if ((err as Error).name === "AbortError" || reqId !== geoReqIdRef.current) return;
+        geoRetryAfterRef.current = Date.now() + GEO_RETRY_BACKOFF_MS;
+        geoLastRef.current = null; // allow a retry once the back-off has passed
+        setPlaceName(null);
+        setPlaceStatus("error");
+      } finally {
+        if (geoAbortRef.current === ctrl) geoAbortRef.current = null;
+      }
+    }, wait);
+  };
+
+  const stopGps = () => {
+    if (gpsWatchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+      gpsWatchIdRef.current = null;
+    }
+
+    cancelGeocode();
+    geoLastRef.current = null;
+    geoRetryAfterRef.current = 0;
+    setPlaceName(null);
+    setPlaceStatus("idle");
+
+    setGpsActive(false);
+    setGpsPosition(null);
+    setGpsStatus("GPS tracking is off");
+    gpsCenteredRef.current = false;
+    gpsLatestRef.current = null;
+    api.current?.hideGpsMarker();
+  };
+
+  const startGps = () => {
+    if (!navigator.geolocation) {
+      setGpsStatus("Geolocation is not supported by this browser.");
+      return;
+    }
+
+    if (gpsWatchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+      gpsWatchIdRef.current = null;
+    }
+
+    cancelGeocode();
+    geoLastRef.current = null;
+    geoRetryAfterRef.current = 0;
+    setPlaceName(null);
+    setPlaceStatus("idle");
+
+    gpsCenteredRef.current = false;
+    setGpsActive(true);
+    setGpsStatus("Waiting for GPS position...");
+
+    gpsWatchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        const lat = position.coords.latitude;
+        const lon = position.coords.longitude;
+        const accuracy = position.coords.accuracy;
+
+        setGpsPosition({ lat, lon, accuracy });
+        setGpsStatus("GPS location updated");
+        gpsLatestRef.current = { lat, lon };
+
+        api.current?.setGpsPosition(lat, lon);
+
+        // Only the first fix recenters the globe; "Center on GPS" does it on demand afterwards.
+        if (!gpsCenteredRef.current && api.current) {
+          api.current.centerOn(lat, lon);
+          gpsCenteredRef.current = true;
+        }
+
+        scheduleReverseGeocode(lat, lon);
+      },
+      (error) => {
+        if (error.code === error.PERMISSION_DENIED) {
+          setGpsStatus("Location permission denied. Allow it in your browser.");
+          if (gpsWatchIdRef.current !== null) {
+            navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+            gpsWatchIdRef.current = null;
+          }
+          setGpsActive(false);
+        } else if (error.code === error.POSITION_UNAVAILABLE) {
+          setGpsStatus("Your location is currently unavailable.");
+        } else {
+          setGpsStatus("GPS timed out. Try again.");
+        }
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 20000,
+      },
+    );
+  };
 
   useEffect(() => {
     live.current = { selectedId, onSelect, fires, showFires, selectedFireId, onFireSelect, onFireStats };
   });
+
+  // Stop the GPS watcher and any pending reverse-geocoding work when the component unmounts.
+  useEffect(() => {
+    return () => {
+      if (gpsWatchIdRef.current !== null && typeof navigator !== "undefined" && navigator.geolocation) {
+        navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+        gpsWatchIdRef.current = null;
+      }
+      if (geoTimerRef.current !== null) {
+        window.clearTimeout(geoTimerRef.current);
+        geoTimerRef.current = null;
+      }
+      if (geoAbortRef.current) {
+        geoAbortRef.current.abort();
+        geoAbortRef.current = null;
+      }
+      geoReqIdRef.current++;
+    };
+  }, []);
 
   useEffect(() => {
     const el = wrap.current;
@@ -232,7 +475,7 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
     const focus = (id: string) => {
       const l = locations.find((x) => x.id === id);
       if (l) { tgt.lat = l.lat; tgt.lon = l.lon; }
-    };
+    }
 
     // Zoom: eased distance factor applied to the responsive base camera distance.
     let camBase = 3.7;
@@ -260,6 +503,14 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
     const fireRing = new THREE.Mesh(new THREE.RingGeometry(0.032, 0.04, 40), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
     fireRing.visible = false;
     group.add(fireRing);
+    // GPS marker: green so it is clearly different from the cyan location pins and the yellow/red fire markers.
+    const gpsMarker = new THREE.Group();
+    const gpsDot = new THREE.Mesh(new THREE.SphereGeometry(0.018, 16, 16), new THREE.MeshBasicMaterial({ color: 0x4ade80 }));
+    const gpsRing = new THREE.Mesh(new THREE.RingGeometry(0.028, 0.036, 40), new THREE.MeshBasicMaterial({ color: 0x4ade80, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+    gpsDot.renderOrder = gpsRing.renderOrder = 4;
+    gpsMarker.add(gpsDot, gpsRing);
+    gpsMarker.visible = false;
+    group.add(gpsMarker);
     let firePoints: THREE.Points | null = null;
     let fireData: { id: string; lat: number; lon: number; pos: THREE.Vector3 }[] = [];
     let fireVisible = live.current.showFires;
@@ -312,9 +563,23 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
       fireVisible = v;
       if (firePoints) firePoints.visible = v;
     };
+    const centerOn = (lat: number, lon: number) => {
+      tgt.lat = lat;
+      tgt.lon = lon;
+    };
+    const setGpsPosition = (lat: number, lon: number) => {
+      const pos = ll(lat, lon, 1.012);
+      gpsDot.position.copy(pos);
+      gpsRing.position.copy(pos);
+      gpsRing.quaternion.setFromUnitVectors(Z_AXIS, pos.clone().normalize());
+      gpsMarker.visible = true;
+    };
+    const hideGpsMarker = () => { gpsMarker.visible = false; };
 
-    api.current = { focus, setFires, setFiresVisible, frameFires, zoomBy };
+    api.current = { focus, setFires, setFiresVisible, frameFires, zoomBy, centerOn, setGpsPosition, hideGpsMarker };
     setFires(live.current.fires ?? []);
+    // If the scene is rebuilt while tracking, restore the marker from the latest fix.
+    if (gpsLatestRef.current) setGpsPosition(gpsLatestRef.current.lat, gpsLatestRef.current.lon);
 
     const setSun = () => {
       const s = solarState();
@@ -463,6 +728,13 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
         }
       });
 
+      // GPS marker keeps a constant on-screen size at any zoom, with a gentle pulse.
+      if (gpsMarker.visible) {
+        gpsDot.scale.setScalar((5.4 * pxw) / 0.018); // ~5px radius
+        gpsRing.scale.setScalar(((11 * pxw) / 0.032) * (1 + pulse * 0.8));
+        (gpsRing.material as THREE.MeshBasicMaterial).opacity = 1 - pulse * 0.7;
+      }
+
       const sf = fireVisible && live.current.selectedFireId ? fireData.find((f) => f.id === live.current.selectedFireId) : undefined;
       fireRing.visible = !!sf;
       if (sf) {
@@ -536,8 +808,113 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
     if (frameSignal > 0) api.current?.frameFires();
   }, [frameSignal]);
 
+  // What to show on the PLACE row. Never fabricated: only the geocoder's own result, or an honest status.
+  const placeText = placeName
+    ? placeStatus === "loading"
+      ? `${placeName} (updating…)`
+      : placeName
+    : placeStatus === "loading"
+      ? "Resolving place name…"
+      : placeStatus === "error"
+        ? "Place name unavailable"
+        : "—";
+
   return (
     <div ref={wrap} className="relative h-full w-full overflow-hidden">
+      <div className="absolute left-3 top-3 z-10 max-h-[calc(100%-1.5rem)] w-[min(280px,calc(100%-5rem))] overflow-y-auto border border-cyan-400/25 bg-[#06122b]/90 p-3 font-mono text-xs text-cyan-100 shadow-lg backdrop-blur-md">
+        <div className="mb-2 flex items-center gap-2 font-semibold text-white">
+          <span
+            className={`inline-block size-2 rounded-full ${
+              gpsActive
+                ? "animate-pulse bg-green-400"
+                : "bg-slate-500"
+            }`}
+          />
+          MY CURRENT LOCATION
+        </div>
+
+        <div className="mb-3 break-words text-[11px] leading-relaxed text-slate-300" role="status" aria-live="polite">
+          {gpsStatus}
+        </div>
+
+        {gpsPosition && (
+          <div className="mb-3 space-y-1">
+            <div className="break-words">
+              PLACE:{" "}
+              <span className={placeStatus === "error" && !placeName ? "text-slate-400" : "text-white"}>
+                {placeText}
+              </span>
+            </div>
+
+            <div>
+              LAT:{" "}
+              <span className="text-white">
+                {gpsPosition.lat.toFixed(6)}°
+              </span>
+            </div>
+
+            <div>
+              LON:{" "}
+              <span className="text-white">
+                {gpsPosition.lon.toFixed(6)}°
+              </span>
+            </div>
+
+            <div>
+              ACCURACY:{" "}
+              <span className="text-white">
+                ±{Math.round(gpsPosition.accuracy)} m
+              </span>
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2">
+          {!gpsActive ? (
+            <button
+              onClick={startGps}
+              className="border border-green-400/50 bg-green-400/10 px-3 py-2 text-green-200 hover:bg-green-400/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-green-300"
+            >
+              Track My Location
+            </button>
+          ) : (
+            <button
+              onClick={stopGps}
+              className="border border-red-400/50 bg-red-400/10 px-3 py-2 text-red-200 hover:bg-red-400/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-300"
+            >
+              Stop Tracking
+            </button>
+          )}
+
+          {gpsPosition && (
+            <button
+              onClick={() =>
+                api.current?.centerOn(
+                  gpsPosition.lat,
+                  gpsPosition.lon,
+                )
+              }
+              className="border border-cyan-400/40 px-3 py-2 text-cyan-100 hover:bg-cyan-400/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300"
+            >
+              Center on GPS
+            </button>
+          )}
+        </div>
+
+        {gpsPosition && (
+          <div className="mt-3 text-[10px] leading-snug text-slate-400">
+            Place names ©{" "}
+            <a
+              href="https://www.openstreetmap.org/copyright"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline hover:text-cyan-200"
+            >
+              OpenStreetMap contributors
+            </a>
+          </div>
+        )}
+      </div>
       {failed && (
         <p className="absolute inset-0 grid place-items-center p-6 text-center text-sm text-[#6f8cb3]">
           WebGL is unavailable in this browser, so the 3D Earth can’t be shown. The rest of the dashboard still works.

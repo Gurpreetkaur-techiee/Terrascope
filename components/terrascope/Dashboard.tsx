@@ -12,7 +12,7 @@ import Panel from "./Panel";
 import FirePanel from "./FirePanel";
 import { useFires } from "./useFires";
 import { fmtLat, fmtLon } from "@/lib/astro";
-import OrbitAssistant from "./OrbitAssistant";
+
 
 function UtcClock() {
   const [t, setT] = useState<Date | null>(null);
@@ -108,7 +108,7 @@ export default function Dashboard() {
         </main>
         
       </div>
-       <OrbitAssistant selectedFire={selectedFire} />
+       
     </div>
   );
 }
