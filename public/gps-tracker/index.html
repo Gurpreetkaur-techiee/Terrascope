@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live GPS Tracker</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: #fff;
+    }
+
+    .header {
+      padding: 14px 16px;
+      background: #111827;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .title {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .sub {
+      margin-top: 6px;
+      font-size: 14px;
+      color: #cbd5e1;
+      word-break: break-word;
+    }
+
+    #map {
+      height: calc(100vh - 76px);
+      width: 100%;
+    }
+
+    .badge {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #1f2937;
+      font-size: 13px;
+      color: #93c5fd;
+    }
+
+    .error {
+      color: #fca5a5;
+      margin-top: 8px;
+      font-size: 14px;
+    }
+
+    .btn-row {
+      margin-top: 10px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .primary {
+      background: #2563eb;
+      color: white;
+    }
+
+    .secondary {
+      background: #374151;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1 class="title">Live GPS Tracker</h1>
+    <div class="sub" id="coords">Waiting for location...</div>
+    <div class="badge" id="status">Tracking: Off</div>
+
+    <div class="btn-row">
+      <button class="primary" id="startBtn">Start Tracking</button>
+      <button class="secondary" id="stopBtn">Stop Tracking</button>
+    </div>
+
+    <div class="error" id="errorMsg"></div>
+  </div>
+
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    let map;
+    let marker = null;
+    let accuracyCircle = null;
+    let watchId = null;
+
+    const coordsEl = document.getElementById("coords");
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("errorMsg");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+
+    function initMap(lat = 28.6139, lng = 77.2090) {
+      map = L.map("map").setView([lat, lng], 15);
+
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+    }
+
+    function updateLocation(position) {
+      const lat = position.coords.latitude;
+      const lng = position.coords.longitude;
+      const acc = position.coords.accuracy;
+
+      coordsEl.textContent = `Latitude: ${lat.toFixed(6)} | Longitude: ${lng.toFixed(6)} | Accuracy: ±${Math.round(acc)} m`;
+
+      if (!marker) {
+        marker = L.marker([lat, lng]).addTo(map).bindPopup("Current Location");
+      } else {
+        marker.setLatLng([lat, lng]);
+      }
+
+      if (!accuracyCircle) {
+        accuracyCircle = L.circle([lat, lng], {
+          radius: acc,
+          color: "#3b82f6",
+          fillColor: "#60a5fa",
+          fillOpacity: 0.2
+        }).addTo(map);
+      } else {
+        accuracyCircle.setLatLng([lat, lng]);
+        accuracyCircle.setRadius(acc);
+      }
+
+      map.setView([lat, lng], map.getZoom(), { animate: true });
+      statusEl.textContent = "Tracking: Active";
+      errorEl.textContent = "";
+    }
+
+    function handleError(err) {
+      let msg = "Unable to fetch location.";
+      if (err.code === 1) msg = "Location permission denied.";
+      if (err.code === 2) msg = "Location unavailable.";
+      if (err.code === 3) msg = "Location request timed out.";
+
+      errorEl.textContent = msg;
+      statusEl.textContent = "Tracking: Error";
+    }
+
+    function startTracking() {
+      if (!navigator.geolocation) {
+        errorEl.textContent = "Geolocation is not supported by this browser.";
+        return;
+      }
+
+      statusEl.textContent = "Tracking: Starting...";
+      watchId = navigator.geolocation.watchPosition(
+        updateLocation,
+        handleError,
+        {
+          enableHighAccuracy: true,
+          maximumAge: 0,
+          timeout: 10000
+        }
+      );
+    }
+
+    function stopTracking() {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+      statusEl.textContent = "Tracking: Off";
+      errorEl.textContent = "";
+    }
+
+    startBtn.addEventListener("click", () => {
+      if (!map) initMap();
+      startTracking();
+    });
+
+    stopBtn.addEventListener("click", stopTracking);
+
+    initMap();
+  </script>
+</body>
+</html>
