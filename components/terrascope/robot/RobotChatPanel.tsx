@@ -63,7 +63,10 @@ export default function RobotChatPanel({
   chat: RobotChat;
   onClose: () => void;
 }) {
-  const { messages, robotState, isBusy, error, send, retry, stop, setListening } = chat;
+    const {
+    messages, robotState, isBusy, error, send, retry, stop, setListening,
+    voiceEnabled, setVoiceEnabled, speechSupported,
+  } = chat;
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -98,6 +101,17 @@ export default function RobotChatPanel({
       className="fixed bottom-36 right-6 z-40 h-[min(34rem,calc(100vh-10rem))] w-[24rem] max-w-[calc(100vw-3rem)] bg-[#030816] shadow-[0_0_60px_rgba(34,211,238,0.15)]"
     >
       <Panel title="Terra" className="flex h-full min-h-0 flex-col">
+           {speechSupported && (
+     <button
+       type="button"
+       onClick={() => setVoiceEnabled(!voiceEnabled)}
+       className={`absolute right-[4.75rem] top-3 border px-2 py-0.5 text-xs hover:text-white ${focusRing} ${
+         voiceEnabled ? "border-cyan-400/40 text-cyan-200" : "border-cyan-400/20 text-[#6f8cb3]"
+       }`}
+     >
+       {voiceEnabled ? "Voice on" : "Voice off"}
+     </button>
+   )}
         <button
           type="button"
           onClick={onClose}

@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import RobotAvatar from "./RobotAvatar";
 import RobotChatPanel from "./RobotChatPanel";
 import { mockRobotService } from "./mockRobotService";
+import { browserSpeechService } from "./browserSpeech";
 import { useRobotChat } from "./useRobotChat";
 
 const PANEL_ID = "terra-chat-panel";
@@ -11,7 +12,7 @@ const PANEL_ID = "terra-chat-panel";
 export default function RobotAssistant() {
   // To connect the real backend later, replace mockRobotService with a
   // RobotChatService implementation. Nothing else in the UI needs to change.
-  const chat = useRobotChat(mockRobotService);
+  const chat = useRobotChat(mockRobotService, browserSpeechService);
   const { setListening } = chat;
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);

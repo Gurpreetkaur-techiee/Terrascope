@@ -33,3 +33,14 @@ export type RobotStreamEvent =
 export interface RobotChatService {
   send(request: RobotChatRequest, signal: AbortSignal): AsyncIterable<RobotStreamEvent>;
 }
+
+// Reads Terra's replies aloud. Separate from the chat service on purpose:
+// the backend only streams text and never needs to know about voice.
+export type SpeechStatus = "idle" | "speaking";
+
+export interface RobotSpeechService {
+  readonly isSupported: boolean;
+  speak(text: string): void; // queue text to be read aloud
+  cancel(): void; // stop immediately and clear the queue
+  subscribe(listener: (status: SpeechStatus) => void): () => void;
+}
