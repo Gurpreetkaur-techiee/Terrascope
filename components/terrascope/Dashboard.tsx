@@ -12,12 +12,12 @@ import Panel from "./Panel";
 import FirePanel from "./FirePanel";
 import { useFires } from "./useFires";
 import { fmtLat, fmtLon } from "@/lib/astro";
-<<<<<<< HEAD
 
-=======
+
+
 import KnowledgePanel from "./KnowledgePanel";
 import type { DashboardView } from "./Sidebar";
->>>>>>> 37a3ece (Add Knowledge AI panel and remove old ORBIT chatbot)
+
 
 function UtcClock() {
   const [t, setT] = useState<Date | null>(null);
@@ -122,11 +122,6 @@ export default function Dashboard() {
           <KnowledgePanel />
         </main>
       </div>
-<<<<<<< HEAD
-       
-=======
-  
->>>>>>> 37a3ece (Add Knowledge AI panel and remove old ORBIT chatbot)
     </div>
   );
 }
