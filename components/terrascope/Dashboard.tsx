@@ -1,9 +1,10 @@
+
 "use client";
 
 import { useEffect, useState } from "react";
 import { locations, satellites } from "@/lib/terrascope-data";
 import Sidebar from "./Sidebar";
-import LocationSearch from "./LocationSearch";
+import LocationSearch, { type SearchedPlace } from "./LocationSearch";
 import Globe from "./Globe";
 import Telemetry from "./Telemetry";
 import Timeline from "./Timeline";
@@ -12,8 +13,6 @@ import Panel from "./Panel";
 import FirePanel from "./FirePanel";
 import { useFires } from "./useFires";
 import { fmtLat, fmtLon } from "@/lib/astro";
-
-type DashboardView = "mission";
 
 function UtcClock() {
   const [t, setT] = useState<Date | null>(null);
@@ -39,19 +38,51 @@ function UtcClock() {
 
 export default function Dashboard() {
   const [menu, setMenu] = useState(false);
-  const [selectedId, setSelectedId] = useState("ludhiana");
+
+  // A monitored location is selected by default.
+  const [selectedId, setSelectedId] = useState<string | null>("ludhiana");
+
+  // Stores a location selected through worldwide search.
+  const [searchedPlace, setSearchedPlace] =
+    useState<SearchedPlace | null>(null);
+
   const [showFires, setShowFires] = useState(true);
   const [selectedFireId, setSelectedFireId] = useState<string | null>(null);
+
   const [fireStats, setFireStats] = useState<{
     rendered: number;
     skipped: number;
   } | null>(null);
+
   const [frameTick, setFrameTick] = useState(0);
 
-  const loc = locations.find((l) => l.id === selectedId) ?? locations[0];
   const fireState = useFires();
+
+  // When a searched place is active, use its coordinates and name.
+  // Spreading the existing location preserves any additional Location fields
+  // required by other dashboard components.
+  const loc = searchedPlace
+    ? ({
+        ...locations[0],
+        ...searchedPlace,
+      } as (typeof locations)[number])
+    : locations.find((l) => l.id === selectedId) ?? locations[0];
+
   const selectedFire =
     fireState.fires.find((f) => f.id === selectedFireId) ?? null;
+
+  // Called when the user chooses one of the existing monitored sites.
+  const handleSiteSelect = (id: string) => {
+    setSearchedPlace(null);
+    setSelectedId(id);
+  };
+
+  // Called when the user chooses a worldwide search result.
+  const handlePlaceSelect = (place: SearchedPlace) => {
+    setSelectedId(null);
+    setSearchedPlace(place);
+    setSelectedFireId(null);
+  };
 
   return (
     <div className="flex min-h-screen bg-[#030816] bg-[radial-gradient(ellipse_at_top,rgba(14,60,120,0.35),transparent_60%)] text-[#cfe8ff]">
@@ -72,18 +103,28 @@ export default function Dashboard() {
 
           <LocationSearch
             locations={locations}
-            onSelect={setSelectedId}
-            onSelectPlace={() => {}}
+            onSelect={handleSiteSelect}
+            onSelectPlace={handlePlaceSelect}
           />
 
           <UtcClock />
         </header>
 
         <main className="mx-auto max-w-[1400px] space-y-6 px-4 py-6 sm:px-8">
+          {/* Selected location information */}
           <section id="overview" className="scroll-mt-20">
-            <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl [text-shadow:0_0_24px_rgba(34,211,238,0.35)]">
-              {loc.name}
-            </h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl [text-shadow:0_0_24px_rgba(34,211,238,0.35)]">
+                {loc.name}
+              </h1>
+
+              {searchedPlace && (
+                <span className="border border-green-400/30 bg-green-400/10 px-2 py-1 text-[10px] uppercase tracking-wider text-green-300">
+                  Search location
+                </span>
+              )}
+            </div>
+
             <p className="mt-1 text-sm text-[#6f8cb3]">
               {loc.region} ·{" "}
               <span className="font-mono text-[#8fb0d8]">
@@ -92,6 +133,7 @@ export default function Dashboard() {
             </p>
           </section>
 
+          {/* 3D Globe and information panel */}
           <section
             id="globe"
             className="grid scroll-mt-20 gap-4 xl:grid-cols-[minmax(0,1fr)_340px]"
@@ -102,7 +144,8 @@ export default function Dashboard() {
                   locations={locations}
                   satellites={satellites}
                   selectedId={selectedId}
-                  onSelect={setSelectedId}
+                  onSelect={handleSiteSelect}
+                  searchTarget={searchedPlace}
                   fires={fireState.fires}
                   showFires={showFires}
                   selectedFireId={selectedFireId}
@@ -118,11 +161,12 @@ export default function Dashboard() {
                 Orbit paths are illustrative and not to scale
               </p>
 
+              {/* Existing monitored locations */}
               <ul className="absolute right-3 top-3 hidden max-h-[60%] gap-1 overflow-auto sm:grid">
                 {locations.map((l) => (
                   <li key={l.id}>
                     <button
-                      onClick={() => setSelectedId(l.id)}
+                      onClick={() => handleSiteSelect(l.id)}
                       aria-pressed={l.id === selectedId}
                       className={`w-full px-3 py-1 text-left text-xs transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300 ${
                         l.id === selectedId
@@ -137,34 +181,45 @@ export default function Dashboard() {
               </ul>
             </div>
 
-            
+            {/* Scrollable information panel */}
             <div className="min-w-0 h-[420px] sm:h-[560px] xl:h-[680px] overflow-y-auto overscroll-contain space-y-4 pr-1">
               <FirePanel
-              state={fireState}
-              show={showFires}
-              onToggle={() => setShowFires((v) => !v)}
-              selected={selectedFire}
-              onClear={() => setSelectedFireId(null)}
-              rendered={fireStats?.rendered ?? null}
-              onFrame={() => setFrameTick((n) => n + 1)}
-            />
+                state={fireState}
+                show={showFires}
+                onToggle={() => setShowFires((v) => !v)}
+                selected={selectedFire}
+                onClear={() => setSelectedFireId(null)}
+                rendered={fireStats?.rendered ?? null}
+                onFrame={() => setFrameTick((n) => n + 1)}
+              />
 
-            <Telemetry loc={loc} satellites={satellites} />
-          </div>
-
+              {/* Receives the active searched or monitored location */}
+              <Telemetry
+                loc={loc}
+                satellites={satellites}
+              />
+            </div>
           </section>
 
+          {/* Satellite pass timeline */}
           <section id="timeline" className="scroll-mt-20">
             <Panel title="Satellite passes, 24 hours UTC" tag="Sample schedule">
-              <Timeline locationId={selectedId} />
+              <Timeline locationId={loc.id} />
             </Panel>
           </section>
 
+          {/* Existing teammate's satellite imagery comparison and change detection */}
           <section id="compare" className="scroll-mt-20">
             <h2 className="mb-4 font-medium text-white">
               Change detection
             </h2>
-            <ChangeDetection key={loc.id} name={loc.name} lat={loc.lat} lon={loc.lon} />
+
+            <ChangeDetection
+              key={`${loc.id}-${loc.lat}-${loc.lon}`}
+              name={loc.name}
+              lat={loc.lat}
+              lon={loc.lon}
+            />
           </section>
         </main>
       </div>
