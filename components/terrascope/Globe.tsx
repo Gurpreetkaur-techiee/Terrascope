@@ -5,6 +5,7 @@ import * as THREE from "three";
 import type { Location, Satellite } from "@/lib/terrascope-data";
 import { solarState, fmtLat, fmtLon } from "@/lib/astro";
 import type { FireMarker } from "./useFires";
+import type { SearchedPlace } from "./LocationSearch";
 
 const RAD = Math.PI / 180;
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
@@ -64,7 +65,8 @@ void main(){
 type Props = {
   locations: Location[];
   satellites: Satellite[];
-  selectedId: string;
+  /** Selected monitored site. Pass null while a searched place is active so no monitored pin is highlighted. */
+  selectedId: string | null;
   onSelect: (id: string) => void;
   /** Load /earth/day.jpg and /earth/night.jpg (equirectangular). Defaults to true. */
   useTextures?: boolean;
@@ -77,6 +79,8 @@ type Props = {
   onFireStats?: (s: { rendered: number; skipped: number }) => void;
   /** Increment to zoom/center the globe on all current detections. */
   frameSignal?: number;
+  /** A place picked from worldwide search: shown with a green marker and the globe rotates to it. */
+  searchTarget?: SearchedPlace | null;
 };
 
 const FIRE_COLD = new THREE.Color("#ffd34d");
@@ -100,6 +104,8 @@ type FireApi = {
   centerOn: (lat: number, lon: number) => void;
   setGpsPosition: (lat: number, lon: number) => void;
   hideGpsMarker: () => void;
+  showSearchTarget: (lat: number, lon: number) => void;
+  hideSearchTarget: () => void;
 };
 
 // ---- Reverse geocoding (OpenStreetMap Nominatim) ----
@@ -139,10 +145,10 @@ const placeFromAddress = (addr: Record<string, string | undefined> | undefined):
   return parts.length ? parts.join(", ") : null;
 };
 
-export default function Globe({ locations, satellites, selectedId, onSelect, useTextures = true, fires, showFires = true, selectedFireId = null, onFireSelect, onFireStats, frameSignal = 0 }: Props) {
+export default function Globe({ locations, satellites, selectedId, onSelect, useTextures = true, fires, showFires = true, selectedFireId = null, onFireSelect, onFireStats, frameSignal = 0, searchTarget = null }: Props) {
   const wrap = useRef<HTMLDivElement>(null);
   const reticle = useRef<HTMLDivElement>(null);
-  const live = useRef({ selectedId, onSelect, fires, showFires, selectedFireId, onFireSelect, onFireStats });
+  const live = useRef({ selectedId, onSelect, fires, showFires, selectedFireId, onFireSelect, onFireStats, searchTarget });
   const api = useRef<FireApi | null>(null);
   const [failed, setFailed] = useState(false);
   const [gpsActive, setGpsActive] = useState(false);
@@ -325,7 +331,7 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
   };
 
   useEffect(() => {
-    live.current = { selectedId, onSelect, fires, showFires, selectedFireId, onFireSelect, onFireStats };
+    live.current = { selectedId, onSelect, fires, showFires, selectedFireId, onFireSelect, onFireStats, searchTarget };
   });
 
   // Stop the GPS watcher and any pending reverse-geocoding work when the component unmounts.
@@ -503,14 +509,24 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
     const fireRing = new THREE.Mesh(new THREE.RingGeometry(0.032, 0.04, 40), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
     fireRing.visible = false;
     group.add(fireRing);
-    // GPS marker: green so it is clearly different from the cyan location pins and the yellow/red fire markers.
+    // GPS marker: fuchsia, so it differs from the cyan pins, yellow/red fires and the green search marker.
     const gpsMarker = new THREE.Group();
-    const gpsDot = new THREE.Mesh(new THREE.SphereGeometry(0.018, 16, 16), new THREE.MeshBasicMaterial({ color: 0x4ade80 }));
-    const gpsRing = new THREE.Mesh(new THREE.RingGeometry(0.028, 0.036, 40), new THREE.MeshBasicMaterial({ color: 0x4ade80, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+    const gpsDot = new THREE.Mesh(new THREE.SphereGeometry(0.018, 16, 16), new THREE.MeshBasicMaterial({ color: 0xe879f9 }));
+    const gpsRing = new THREE.Mesh(new THREE.RingGeometry(0.028, 0.036, 40), new THREE.MeshBasicMaterial({ color: 0xe879f9, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
     gpsDot.renderOrder = gpsRing.renderOrder = 4;
     gpsMarker.add(gpsDot, gpsRing);
     gpsMarker.visible = false;
     group.add(gpsMarker);
+    // Searched-location marker: glowing green dot + halo + pulsing ring. Created once and moved, never rebuilt.
+    const SEARCH_COLOR = 0x3dff8a;
+    const searchMarker = new THREE.Group();
+    const searchDot = new THREE.Mesh(new THREE.SphereGeometry(0.016, 16, 16), new THREE.MeshBasicMaterial({ color: SEARCH_COLOR }));
+    const searchHalo = new THREE.Mesh(new THREE.SphereGeometry(0.045, 16, 16), new THREE.MeshBasicMaterial({ color: SEARCH_COLOR, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending, depthWrite: false }));
+    const searchRing = new THREE.Mesh(new THREE.RingGeometry(0.03, 0.036, 40), new THREE.MeshBasicMaterial({ color: SEARCH_COLOR, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+    searchDot.renderOrder = searchHalo.renderOrder = searchRing.renderOrder = 5;
+    searchMarker.add(searchHalo, searchDot, searchRing);
+    searchMarker.visible = false;
+    group.add(searchMarker);
     let firePoints: THREE.Points | null = null;
     let fireData: { id: string; lat: number; lon: number; pos: THREE.Vector3 }[] = [];
     let fireVisible = live.current.showFires;
@@ -575,11 +591,25 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
       gpsMarker.visible = true;
     };
     const hideGpsMarker = () => { gpsMarker.visible = false; };
+    // Same ll() convention and the same tgt/cur easing as pins, so the place ends up front and centre.
+    const showSearchTarget = (lat: number, lon: number) => {
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      const pos = ll(lat, lon, 1.016); // above pins (1.004), fires (1.008) and GPS (1.012)
+      searchDot.position.copy(pos);
+      searchHalo.position.copy(pos);
+      searchRing.position.copy(pos);
+      searchRing.quaternion.setFromUnitVectors(Z_AXIS, pos.clone().normalize());
+      searchMarker.visible = true;
+      centerOn(lat, lon);
+    };
+    const hideSearchTarget = () => { searchMarker.visible = false; };
 
-    api.current = { focus, setFires, setFiresVisible, frameFires, zoomBy, centerOn, setGpsPosition, hideGpsMarker };
+    api.current = { focus, setFires, setFiresVisible, frameFires, zoomBy, centerOn, setGpsPosition, hideGpsMarker, showSearchTarget, hideSearchTarget };
     setFires(live.current.fires ?? []);
     // If the scene is rebuilt while tracking, restore the marker from the latest fix.
     if (gpsLatestRef.current) setGpsPosition(gpsLatestRef.current.lat, gpsLatestRef.current.lon);
+    // Likewise restore the searched-location marker.
+    if (live.current.searchTarget) showSearchTarget(live.current.searchTarget.lat, live.current.searchTarget.lon);
 
     const setSun = () => {
       const s = solarState();
@@ -650,6 +680,7 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
       }
       if (!moved && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) { moved = true; canvas.style.cursor = "grabbing"; }
       if (!moved) return;
+      // Dragging overwrites the target, so any automatic rotation toward a searched place stops immediately.
       tgt.lon = ((((tgt.lon - (e.clientX - lx) * 0.3) + 180) % 360) + 360) % 360 - 180;
       tgt.lat = Math.max(-80, Math.min(80, tgt.lat + (e.clientY - ly) * 0.3));
       lx = e.clientX; ly = e.clientY;
@@ -735,6 +766,14 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
         (gpsRing.material as THREE.MeshBasicMaterial).opacity = 1 - pulse * 0.7;
       }
 
+      // Searched-location marker: constant on-screen size, soft halo, pulsing ring.
+      if (searchMarker.visible) {
+        searchDot.scale.setScalar((6 * pxw) / 0.016); // ~6px radius
+        searchHalo.scale.setScalar((14 * pxw) / 0.045); // ~14px glow
+        searchRing.scale.setScalar(((13 * pxw) / 0.033) * (1 + pulse * 1.2));
+        (searchRing.material as THREE.MeshBasicMaterial).opacity = 1 - pulse * 0.85;
+      }
+
       const sf = fireVisible && live.current.selectedFireId ? fireData.find((f) => f.id === live.current.selectedFireId) : undefined;
       fireRing.visible = !!sf;
       if (sf) {
@@ -746,13 +785,17 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
 
       const rt = reticle.current;
       const sp0 = pins.find((p) => p.l.id === sid);
-      if (rt && sp0) {
-        v.copy(sp0.pos);
-        group.localToWorld(v);
-        const visible = v.z > 0.3;
-        v.project(camera);
-        rt.style.opacity = visible ? "1" : "0";
-        rt.style.transform = `translate(${(v.x * 0.5 + 0.5) * el.clientWidth}px, ${(-v.y * 0.5 + 0.5) * el.clientHeight}px)`;
+      if (rt) {
+        if (sp0) {
+          v.copy(sp0.pos);
+          group.localToWorld(v);
+          const visible = v.z > 0.3;
+          v.project(camera);
+          rt.style.opacity = visible ? "1" : "0";
+          rt.style.transform = `translate(${(v.x * 0.5 + 0.5) * el.clientWidth}px, ${(-v.y * 0.5 + 0.5) * el.clientHeight}px)`;
+        } else {
+          rt.style.opacity = "0"; // no monitored site selected (a searched place is active)
+        }
       }
       renderer.render(scene, camera);
     };
@@ -787,8 +830,14 @@ export default function Globe({ locations, satellites, selectedId, onSelect, use
   }, [locations, satellites, useTextures]);
 
   useEffect(() => {
-    api.current?.focus(selectedId);
+    if (selectedId) api.current?.focus(selectedId);
   }, [selectedId]);
+
+  // A new search result moves the existing green marker and rotates the globe to it; null removes the marker.
+  useEffect(() => {
+    if (searchTarget) api.current?.showSearchTarget(searchTarget.lat, searchTarget.lon);
+    else api.current?.hideSearchTarget();
+  }, [searchTarget]);
 
   const autoFramed = useRef(false);
   useEffect(() => {
