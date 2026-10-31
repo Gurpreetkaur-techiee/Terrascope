@@ -8,7 +8,7 @@ import LocationSearch from "./LocationSearch";
 import Globe from "./Globe";
 import Telemetry from "./Telemetry";
 import Timeline from "./Timeline";
-import ComparisonCards from "./ComparisonCards";
+import ChangeDetection from "./ChangeDetection";
 import Panel from "./Panel";
 import FirePanel from "./FirePanel";
 import { useFires } from "./useFires";
@@ -162,7 +162,7 @@ export default function Dashboard() {
             <h2 className="mb-4 font-medium text-white">
               Change detection
             </h2>
-            <ComparisonCards />
+            <ChangeDetection key={loc.id} name={loc.name} lat={loc.lat} lon={loc.lon} />
           </section>
         </main>
       </div>
