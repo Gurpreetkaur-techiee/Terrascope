@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useEffect, useState } from "react";
@@ -74,6 +73,7 @@ export default function Dashboard() {
           <LocationSearch
             locations={locations}
             onSelect={setSelectedId}
+            onSelectPlace={() => {}}
           />
 
           <UtcClock />
@@ -137,19 +137,21 @@ export default function Dashboard() {
               </ul>
             </div>
 
-            <div className="space-y-4">
+            
+            <div className="min-w-0 h-[420px] sm:h-[560px] xl:h-[680px] overflow-y-auto overscroll-contain space-y-4 pr-1">
               <FirePanel
-                state={fireState}
-                show={showFires}
-                onToggle={() => setShowFires((v) => !v)}
-                selected={selectedFire}
-                onClear={() => setSelectedFireId(null)}
-                rendered={fireStats?.rendered ?? null}
-                onFrame={() => setFrameTick((n) => n + 1)}
-              />
+              state={fireState}
+              show={showFires}
+              onToggle={() => setShowFires((v) => !v)}
+              selected={selectedFire}
+              onClear={() => setSelectedFireId(null)}
+              rendered={fireStats?.rendered ?? null}
+              onFrame={() => setFrameTick((n) => n + 1)}
+            />
 
-              <Telemetry loc={loc} satellites={satellites} />
-            </div>
+            <Telemetry loc={loc} satellites={satellites} />
+          </div>
+
           </section>
 
           <section id="timeline" className="scroll-mt-20">
