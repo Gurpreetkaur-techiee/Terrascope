@@ -6,6 +6,7 @@ import { locations, satellites } from "@/lib/terrascope-data";
 import Sidebar from "./Sidebar";
 import LocationSearch, { type SearchedPlace } from "./LocationSearch";
 import Globe from "./Globe";
+import WeatherPanel from "./WeatherPanel";
 import Telemetry from "./Telemetry";
 import Timeline from "./Timeline";
 import ChangeDetection from "./ChangeDetection";
@@ -197,6 +198,11 @@ export default function Dashboard() {
               <Telemetry
                 loc={loc}
                 satellites={satellites}
+              />
+              <WeatherPanel
+                lat={loc.lat}
+                lon={loc.lon}
+                name={loc.name}
               />
             </div>
           </section>
