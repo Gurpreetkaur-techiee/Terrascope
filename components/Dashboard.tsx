@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { locations } from "@/lib/terrascope-data";
+import { locations, satellites } from "@/lib/terrascope-data";
 import Sidebar from "./Sidebar";
 import LocationSearch from "./LocationSearch";
-import Globe from "./Globe";
+import Globe from "./terrascope/Globe";
 import Timeline from "./Timeline";
 import ComparisonCards from "./ComparisonCards";
 
@@ -52,7 +52,12 @@ export default function Dashboard() {
           <section id="globe" className={`${panel} scroll-mt-20`}>
             <div className="grid items-center gap-6 md:grid-cols-[minmax(0,1fr)_260px]">
               <div className="mx-auto w-full max-w-[520px]">
-                <Globe locations={locations} selectedId={selectedId} onSelect={setSelectedId} />
+              <Globe
+  locations={locations}
+  satellites={satellites}
+  selectedId={selectedId}
+  onSelect={setSelectedId}
+/>
               </div>
               <div>
                 <h2 className="font-medium text-slate-100">Monitored sites</h2>
