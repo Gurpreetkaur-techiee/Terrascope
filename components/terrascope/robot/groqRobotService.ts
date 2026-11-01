@@ -23,6 +23,7 @@ async function* streamGroqResponse(
 
     try {
       const errorData = await response.json();
+
       if (typeof errorData.error === "string") {
         message = errorData.error;
       }
@@ -35,7 +36,10 @@ async function* streamGroqResponse(
   }
 
   if (!response.body) {
-    yield { type: "error", message: "No response stream received." };
+    yield {
+      type: "error",
+      message: "No response stream received.",
+    };
     return;
   }
 
@@ -75,6 +79,16 @@ async function* streamGroqResponse(
           if (typeof delta === "string" && delta.length > 0) {
             yield { type: "text", delta };
           }
+
+          if (parsed.error) {
+            yield {
+              type: "error",
+              message:
+                parsed.error.message ||
+                "An error occurred while generating the response.",
+            };
+            return;
+          }
         } catch {
           // Ignore incomplete or non-JSON stream events.
         }
@@ -82,6 +96,19 @@ async function* streamGroqResponse(
     }
 
     yield { type: "done" };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      yield { type: "done" };
+      return;
+    }
+
+    yield {
+      type: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "Terra could not connect. Please try again.",
+    };
   } finally {
     reader.releaseLock();
   }

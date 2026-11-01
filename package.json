@@ -16,6 +16,7 @@
     "next": "16.4.2",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "satellite.js": "^7.1.0",
     "three": "^0.186.1"
   },
   "devDependencies": {
